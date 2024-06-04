@@ -18,6 +18,7 @@
 #include "threads/mmu.h"
 #include "threads/vaddr.h"
 #include "intrinsic.h"
+#include "threads/malloc.h"
 #ifdef VM
 #include "vm/vm.h"
 #endif
@@ -65,8 +66,7 @@ tid_t process_create_initd(const char *file_name)
 	strlcpy(fn_copy, file_name, PGSIZE); // file_name의 복사본을 fn_copy에 저장 (PGSIZE를 넘지 않도록 주의)
 
 	// /* Extract the first token from FILE_NAME. */	 /* FILE_NAME에서 첫 번째 토큰을 추출합니다. */
-	exec_name = strtok_r(file_name, " ", &save_ptr); // 공백을 기준으로 첫 번째 토큰을 추출하여 save_ptr에 저장합니다.
-
+	exec_name = strtok_r(file_name, " ", &save_ptr);			 // 공백을 기준으로 첫 번째 토큰을 추출하여 save_ptr에 저장합니다.
 	/* Create a new thread to execute FILE_NAME. */				 /* FILE_NAME을 실행할 새로운 스레드를 생성합니다. */
 	tid = thread_create(exec_name, PRI_DEFAULT, initd, fn_copy); // file_name을 실행할 새로운 스레드를 생성합니다.
 	if (tid == TID_ERROR)										 // 스레드 생성에 실패한 경우
@@ -326,7 +326,6 @@ int process_exec(void *f_name)
 	// success = load(file_name, &_if);
 	/* 실행 파일 이름을 load 함수의 첫 번째 인자로 전달합니다. */
 	success = load(argv[0], &_if);
-
 	/* If load failed, quit. */ /* 로드에 실패하면 종료합니다. */
 	if (!success)
 	{
@@ -653,7 +652,6 @@ load(const char *file_name, struct intr_frame *if_)
 	off_t file_ofs;
 	bool success = false;
 	int i;
-
 	/* Allocate and activate page directory. */
 	t->pml4 = pml4_create();
 	if (t->pml4 == NULL)
@@ -913,6 +911,15 @@ install_page(void *upage, void *kpage, bool writable)
 /* From here, codes will be used after project 3.
  * If you want to implement the function for only project 2, implement it on the
  * upper block. */
+static bool
+install_page(void *upage, void *kpage, bool writable)
+{
+	struct thread *t = thread_current();
+
+	/* Verify that there's not already a page at that virtual
+	 * address, then map our page there. */
+	return (pml4_get_page(t->pml4, upage) == NULL && pml4_set_page(t->pml4, upage, kpage, writable));
+}
 
 static bool
 lazy_load_segment(struct page *page, void *aux)
@@ -920,6 +927,13 @@ lazy_load_segment(struct page *page, void *aux)
 	/* TODO: Load the segment from the file */
 	/* TODO: This called when the first page fault occurs on address VA. */
 	/* TODO: VA is available when calling this function. */
+	struct page_info_transmitter *info = (struct page_info_transmitter *)aux;
+
+	if (file_read_at(info->file, page->va, info->read_bytes, info->ofs) != (int)info->read_bytes)
+		return false;
+	memset(page->va + info->read_bytes, 0, info->zero_bytes);
+
+	return true;
 }
 
 /* Loads a segment starting at offset OFS in FILE at address
@@ -943,7 +957,6 @@ load_segment(struct file *file, off_t ofs, uint8_t *upage,
 	ASSERT((read_bytes + zero_bytes) % PGSIZE == 0);
 	ASSERT(pg_ofs(upage) == 0);
 	ASSERT(ofs % PGSIZE == 0);
-
 	while (read_bytes > 0 || zero_bytes > 0)
 	{
 		/* Do calculate how to fill this page.
@@ -954,14 +967,27 @@ load_segment(struct file *file, off_t ofs, uint8_t *upage,
 
 		/* TODO: Set up aux to pass information to the lazy_load_segment. */
 		void *aux = NULL;
+		aux = malloc(sizeof(struct page_info_transmitter));
+		if (aux == NULL)
+			return false;
+
+		((struct page_info_transmitter *)aux)->file = file;
+		((struct page_info_transmitter *)aux)->ofs = ofs;
+		((struct page_info_transmitter *)aux)->read_bytes = page_read_bytes;
+		((struct page_info_transmitter *)aux)->zero_bytes = page_zero_bytes;
+
 		if (!vm_alloc_page_with_initializer(VM_ANON, upage,
 											writable, lazy_load_segment, aux))
+		{
+			free((struct page_info_transmitter *)aux);
 			return false;
+		}
 
 		/* Advance. */
 		read_bytes -= page_read_bytes;
 		zero_bytes -= page_zero_bytes;
 		upage += PGSIZE;
+		ofs += page_read_bytes;
 	}
 	return true;
 }
@@ -977,7 +1003,12 @@ setup_stack(struct intr_frame *if_)
 	 * TODO: If success, set the rsp accordingly.
 	 * TODO: You should mark the page is stack. */
 	/* TODO: Your code goes here */
-
+	if (vm_alloc_page(VM_ANON | VM_MARKER_0, stack_bottom, 1))
+	{
+		success = vm_claim_page(stack_bottom);
+		if (success)
+			if_->rsp = USER_STACK;
+	}
 	return success;
 }
 #endif /* VM */
