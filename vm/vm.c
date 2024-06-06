@@ -97,7 +97,7 @@ struct page *spt_find_page(struct supplemental_page_table *spt, void *va)
 	{
 		return hash_entry(found_elem, struct page, hash_elem);
 	}
-
+	free(page);
 	return NULL;
 }
 /* Insert PAGE into spt with validation. */
@@ -293,9 +293,4 @@ bool page_table_entry_less_function(struct hash_elem *a, struct hash_elem *b, vo
 	struct page *page_a = hash_entry(a, struct page, hash_elem);
 	struct page *page_b = hash_entry(b, struct page, hash_elem);
 	return page_a->va < page_b->va;
-}
-
-void spt_destory(struct hash_elem *hash_elem, void* aux UNUSED){
-	struct page *page = hash_entry(hash_elem, struct page, hash_elem);
-	vm_dealloc_page(page);
 }
