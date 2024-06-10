@@ -59,13 +59,14 @@ static bool
 file_backed_swap_out(struct page *page)
 {
 	struct file_page *file_page UNUSED = &page->file;
-	// struct thread *t = thread_current();
+	struct thread *t = thread_current();
 
-	// if (pml4_is_dirty(t->pml4, page->va))
-	// {
-	// 	// 페이지가 더럽다면 파일에 변경 내용을 기록
-	// 	file_write_at(file_page->file, page->va, file_page->read_bytes, file_page->ofs);
-	// }
+	if (pml4_is_dirty(t->pml4, page->va))
+	{
+		file_write_at(file_page->file, page->va, file_page->read_bytes, file_page->ofs);
+		palloc_free_page(page->frame->kva);
+		pml4_set_dirty(t->pml4, page->va, false);
+	}
 }
 
 /* Destory the file backed page. PAGE will be freed by the caller. */

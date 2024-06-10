@@ -225,7 +225,7 @@ bool vm_try_handle_fault(struct intr_frame *f UNUSED, void *addr UNUSED,
 
 		// 스택 확장이 필요한지 검사
 		if (addr < (void *)USER_STACK &&					  // 접근 주소가 사용자 스택 내에 있고
-				addr == (void *)(f->rsp - 8) &&				  // rsp - 8보다 크거나 같으며
+				addr >= (void *)(f->rsp - 8) &&				  // rsp - 8보다 크거나 같으며
 				addr >= (void *)(USER_STACK - STACK_LIMIT)) // 스택 크기가 1MB 이하인 경우)
 		{
 			vm_stack_growth(addr); // 스택 확장
