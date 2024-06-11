@@ -91,18 +91,16 @@ err:
 
 /* Find VA from spt and return page. On error, return NULL. */
 struct page *spt_find_page(struct supplemental_page_table *spt, void *va) {
-  struct page *page;
-  struct hash_elem *found_elem;
-  page = (struct page *)malloc(sizeof(struct page));
-  page->va = va;
+  struct hash_elem *e = NULL;
+  struct page fake_page;
 
-  found_elem = hash_find(&spt->spt_hash, &page->hash_elem);
-  if (found_elem != NULL) {
-    return hash_entry(found_elem, struct page, hash_elem);
-  }
+  fake_page.va = pg_round_down(va);
 
-  return NULL;
+  e = hash_find(&thread_current()->spt, &fake_page.hash_elem);
+
+  return e ? hash_entry(e, struct page, hash_elem) : NULL;
 }
+
 /* Insert PAGE into spt with validation. */
 bool spt_insert_page(struct supplemental_page_table *spt UNUSED,
                      struct page *page UNUSED) {
@@ -138,7 +136,6 @@ static struct frame *vm_get_victim(void) {
     // printf("@@ owner : %d\n", page->owner->tid);
     // printf("@@ for loop page->va = %p\n", page->va);
     if (page->frame == NULL) {
-
       return page->frame;
     }
 
@@ -157,7 +154,7 @@ static struct frame *vm_get_victim(void) {
       // printf("vm_get_victin() victim page va : %p\n", victim->page->va);
       return victim;
     } else {
-      pml4_set_accessed(&page->owner->pml4, page->va, true);
+      pml4_set_accessed(&page->owner->pml4, page->va, false);
     }
   }
 
@@ -200,13 +197,15 @@ static struct frame *vm_get_frame(void) {
   void *addr = palloc_get_page(PAL_USER);
   if (addr == NULL) return vm_evict_frame();
 
-  frame = calloc(sizeof(struct frame), 1);
-  if (!frame) PANIC("calloc FAIL !! \n");
+  frame = (struct frame *)calloc(1, sizeof(struct frame));
+  if (!frame) PANIC("malloc FAIL !! \n");
 
   frame->kva = addr;
+  frame->page = NULL;
 
   ASSERT(frame != NULL);
   ASSERT(frame->page == NULL);
+
   return frame;
 }
 
@@ -218,11 +217,11 @@ static void vm_stack_growth(void *addr UNUSED) {
   printf("---- stack_grow() 호출 \n");
   // 페이지를 찾을 때까지 루프를 돌며 스택을 확장
   while (spt_find_page(spt, page_addr) == NULL) {
-    succ = vm_alloc_page(VM_ANON | VM_MARKER_0, page_addr,
-                         true);      // 새로운 페이지 할당
-    if (!succ) PANIC("BAAAAAM !!");  // 할당 실패 시 패닉
-    page_addr += PGSIZE;             // 다음 페이지 주소로 이동
-    if (addr >= page_addr) break;  // 필요한 만큼 페이지를 할당했으면 루프 종료
+    succ = vm_alloc_page(VM_ANON | VM_MARKER_0, page_addr, true);
+    if (!succ) PANIC("BAAAAAM !!");
+
+    page_addr += PGSIZE;
+    if (addr >= page_addr) break;
   }
 }
 
@@ -315,8 +314,8 @@ static bool vm_do_claim_page(struct page *page) {
   page->frame = frame;
   page->is_loaded = true;
   /* TODO: Insert page table entry to map page's VA to frame's PA. */
-  struct thread *cur_t = thread_current();
-  pml4_set_page(cur_t->pml4, page->va, frame->kva, page->writable);
+
+  pml4_set_page(page->owner->pml4, page->va, frame->kva, page->writable);
 
   return swap_in(page, frame->kva);
 }

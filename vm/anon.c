@@ -47,22 +47,22 @@ bool anon_initializer(struct page *page, enum vm_type type, void *kva) {
 static bool anon_swap_in(struct page *page, void *kva) {
   struct anon_page *anon_page = &page->anon;
 
-  lock_acquire(&swap_lock);
+  // lock_acquire(&swap_lock);
 
-  printf("swap_in call !! kva : %p\n", kva);
+  // printf("swap_in call !! kva : %p\n", kva);
   for (size_t i = 0; i < 8; i++) {
     disk_read(swap_disk, anon_page->swap_bitmap_idx * 8 + i,
               kva + (DISK_SECTOR_SIZE * i));
   }
-  printf("---- before flip\n");
-  bitmap_dump(swap_bitmap);
+  // printf("---- before flip\n");
+  // bitmap_dump(swap_bitmap);
 
   bitmap_flip(swap_bitmap, anon_page->swap_bitmap_idx);
 
-  printf("---- after flip\n");
-  bitmap_dump(swap_bitmap);
+  // printf("---- after flip\n");
+  // bitmap_dump(swap_bitmap);
 
-  lock_release(&swap_lock);
+  // lock_release(&swap_lock);
 
   return true;
 }
@@ -74,11 +74,10 @@ static bool anon_swap_out(struct page *page) {
 
   // printf("anon swap out() call !! \n");
 
-  lock_acquire(&swap_lock);
-
   bitmap_idx = bitmap_scan_and_flip(swap_bitmap, 0, 1, false);
-  if (bitmap_idx == BITMAP_ERROR || bitmap_idx == -1)
+  if (bitmap_idx == BITMAP_ERROR || bitmap_idx == -1) {
     PANIC("{anon_swap_out()} BITMAP ERROR !!\n");
+  }
 
   anon_page->swap_bitmap_idx = bitmap_idx;
   // printf("bitmap idx : %d\n", bitmap_idx);
@@ -90,9 +89,9 @@ static bool anon_swap_out(struct page *page) {
   }
   // printf("disk write DONE !!\n");
 
-  page->frame = NULL;
+  pml4_clear_page(page->owner->pml4, page->va);
 
-  lock_release(&swap_lock);
+  page->frame = NULL;
 
   return true;
 }
