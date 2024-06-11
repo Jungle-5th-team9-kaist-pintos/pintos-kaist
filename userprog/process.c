@@ -84,7 +84,7 @@ initd(void *f_name)
 
 	process_init();
 
-	lock_init(&filesys_lock); // init lock to avoid race condition protect filesystem
+	// lock_init(&filesys_lock); // init lock to avoid race condition protect filesystem
 
 	if (process_exec(f_name) < 0)
 		PANIC("Fail to launch initd\n");
@@ -122,15 +122,6 @@ tid_t process_fork(const char *name, struct intr_frame *if_ UNUSED)
 	{
 		return TID_ERROR;
 	}
-
-	// /* 삭제 요망*/
-	// if (child->exit_status == -2)
-	// {
-	// 	// 자식이 완전히 종료되고 스케줄링이 이어질 수 있도록 자식에게 signal을 보낸다.
-	// 	// sema_up(&child->exit_sema);
-	// 	// 자식 프로세스의 pid가 아닌 TID_ERROR를 반환한다.
-	// 	return TID_ERROR;
-	// }
 
 	return child_tid;
 }
@@ -244,6 +235,8 @@ __do_fork(void *aux)
 	 * TODO:       from the fork() until this function successfully duplicates
 	 * TODO:       the resources of parent.*/
 
+	// lock_acquire(&filesys_lock); // ADD: filesys_lock at file system
+
 	/* Duplicate file descriptors */ /* 파일 디스크립터 복제 */
 	for (int fd = 2; fd < MAX_FILES; fd++)
 	{
@@ -254,6 +247,9 @@ __do_fork(void *aux)
 				goto error;
 		}
 	}
+
+	// lock_release(&filesys_lock); // ADD: filesys_lock at file system
+
 	current->next_fd = parent->next_fd; // next_fd도 복제
 
 	// /* Notify parent that fork is successful */
@@ -343,7 +339,6 @@ int process_exec(void *f_name)
 
 	/* 페이지 할당 해제 */
 	palloc_free_page(file_name);
-
 	/* Start switched process. */ /* 프로세스를 시작합니다. */
 	// printf("프로세스 시작 ! Starting switched process\n"); /* Debug */
 	do_iret(&_if);
@@ -463,6 +458,7 @@ void process_exit(void)
 	 * TODO: project2/process_termination.html).
 	 * TODO: We recommend you to implement process resource cleanup here. */
 
+	// lock_acquire(&filesys_lock); // ADD: filesys_lock at file system
 	// Close all open file descriptors. /* 모든 파일 디스크립터를 닫습니다. */
 	for (int fd = 2; fd < MAX_FILES; fd++)
 	{
@@ -472,6 +468,7 @@ void process_exit(void)
 			curr->fd_table[fd] = NULL;
 		}
 	}
+	// lock_release(&filesys_lock); // ADD: filesys_lock at file system
 
 	palloc_free_page(curr->fd_table);
 	// palloc_free_multiple(curr->fd_table, 2); // for multi-oom(메모리 누수) fd 0,1 은 stdin, stdout
@@ -479,7 +476,9 @@ void process_exit(void)
 	// Close the running file.
 	if (curr->run_file != NULL)
 	{
+		// lock_acquire(&filesys_lock); // ADD: filesys_lock at file system
 		file_close(curr->run_file);
+		// lock_release(&filesys_lock); // ADD: filesys_lock at file system
 		curr->run_file = NULL;
 	}
 	// file_close(curr->run_file); // 현재 실행 중인 파일을 닫는다. // for rox- (실행중에 수정 못하도록)
@@ -488,11 +487,12 @@ void process_exit(void)
 	// Notify parent that we are exiting. /* 부모에게 종료 상태를 알려줍니다. */
 	sema_up(&curr->wait_sema); // 자식 스레드가 종료될 때 대기하고 있는 부모에게 signal을 보낸다. // 종료되었다고 기다리고 있는 부모 thread에게 signal 보냄-> sema_up에서 val을 올려줌
 
+	process_cleanup(); // pml4를 해제(이 함수를 call 한 thread의 pml4)
+
 	// Wait for parent to acknowledge exit.
 	sema_down(&curr->exit_sema); // 자식 스레드가 완료되었음을 알리는 세마포어를 사용합니다. // 부모의 signal을 기다린다. 대기가 풀리고 나서 do_schedule(THREAD_DYING)이 이어져 다른 스레드가 실행된다. // 부모의 exit_Status가 정확히 전달되었는지 확인(wait)
 
 	// Clean up process resources.
-	process_cleanup(); // pml4를 해제(이 함수를 call 한 thread의 pml4)
 }
 
 /* Free the current process's resources. */
@@ -658,6 +658,8 @@ load(const char *file_name, struct intr_frame *if_)
 		goto done;
 	process_activate(thread_current());
 
+	// lock_acquire(&filesys_lock); // ADD: filesys_lock at file system
+
 	/* Open executable file. */
 	file = filesys_open(file_name);
 	if (file == NULL)
@@ -754,6 +756,7 @@ load(const char *file_name, struct intr_frame *if_)
 done:
 	/* We arrive here whether the load is successful or not. */
 	// file_close(file); // load에서 file_close(file)을 해주면 file이 닫히면서 lock이 풀리게 된다. 따라서 load에서 닫지 말고 process_exit에서 닫아줌
+	// lock_release(&filesys_lock); // ADD: filesys_lock at file system
 	return success;
 }
 
@@ -877,7 +880,7 @@ setup_stack(struct intr_frame *if_)
 	uint8_t *kpage;
 	bool success = false;
 
-	kpage = palloc_get_page(PAL_USER | PAL_ZERO);
+	kpage = palloc_get_page(PAL_USER);
 	if (kpage != NULL)
 	{
 		success = install_page(((uint8_t *)USER_STACK) - PGSIZE, kpage, true);
@@ -912,34 +915,17 @@ install_page(void *upage, void *kpage, bool writable)
  * If you want to implement the function for only project 2, implement it on the
  * upper block. */
 
-static bool
-lazy_load_segment(struct page *page, void *aux)
+bool lazy_load_segment(struct page *page, void *aux)
 {
 	/* TODO: Load the segment from the file */
 	/* TODO: This called when the first page fault occurs on address VA. */
 	/* TODO: VA is available when calling this function. */
-	struct uninit_aux *un_aux = (struct uninit_aux *)aux;
-
-	struct file *file = un_aux->file;
-	off_t ofs = un_aux->ofs;
-	size_t page_read_bytes = un_aux->read_bytes;
-	size_t page_zero_bytes = PGSIZE - page_read_bytes;
-
-	// 	// 파일의 position을 ofs으로 지정한다.
-	// 	file_seek(file, ofs);
-	// // 파일을 read_bytes만큼 물리 프레임에 읽어 들인다.
-	// if (file_read(file, page->frame->kva, page_read_bytes) != (int)page_read_bytes)
-
-	// 파일에서 page_read_bytes 만큼 읽어오기
-	if (file_read_at(file, page->frame->kva, page_read_bytes, ofs) != (int)page_read_bytes)
-	{
-		// 읽기 실패 시 페이지를 해제하고 false 반환
-		palloc_free_page(page->frame->kva);
+	struct page_info_transmitter *info = (struct page_info_transmitter *)aux;
+	if (file_read_at(info->file, page->va, info->read_bytes, info->ofs) != (int)info->read_bytes)
 		return false;
-	}
-	// 나머지 부분을 0으로 채우기
-	memset(page->va + un_aux->read_bytes, 0, un_aux->zero_bytes); // 다 읽은 지점부터 zero_bytes만큼 0으로 채운다.
-
+	memset(page->va + info->read_bytes, 0, info->zero_bytes);
+	pml4_set_dirty(thread_current()->pml4, page->va, false);
+	// list_push_back(&frame_list, &page->frame->frame_elem);
 	return true;
 }
 
@@ -961,33 +947,37 @@ static bool
 load_segment(struct file *file, off_t ofs, uint8_t *upage,
 			 uint32_t read_bytes, uint32_t zero_bytes, bool writable)
 {
-	ASSERT((read_bytes + zero_bytes) % PGSIZE == 0); // read_bytes + zero_bytes가 페이지 크기(PGSIZE)의 배수인지 확인
-	ASSERT(pg_ofs(upage) == 0);						 // upage가 페이지 정렬되어 있는지 확인
-	ASSERT(ofs % PGSIZE == 0);						 // ofs가 페이지 정렬되어 있는지 확인;
-	while (read_bytes > 0 || zero_bytes > 0)		 // read_bytes와 zero_bytes가 0보다 큰 동안 루프를 실행
+	ASSERT((read_bytes + zero_bytes) % PGSIZE == 0);
+	ASSERT(pg_ofs(upage) == 0);
+	ASSERT(ofs % PGSIZE == 0);
+	while (read_bytes > 0 || zero_bytes > 0)
 	{
 		/* Do calculate how to fill this page.
 		 * We will read PAGE_READ_BYTES bytes from FILE
 		 * and zero the final PAGE_ZERO_BYTES bytes. */
-		size_t page_read_bytes = read_bytes < PGSIZE ? read_bytes : PGSIZE; // 최대로 읽을 수 있는 크기는 PGSIZE
+		size_t page_read_bytes = read_bytes < PGSIZE ? read_bytes : PGSIZE;
 		size_t page_zero_bytes = PGSIZE - page_read_bytes;
 
 		/* TODO: Set up aux to pass information to the lazy_load_segment. */
 		void *aux = NULL;
-		struct uninit_aux *un_aux;
-		un_aux = (struct uninit_aux *)malloc(sizeof(struct uninit_aux));
-		ASSERT(un_aux != NULL)
-		un_aux->file = file;				  // 내용이 담긴 파일 객체
-		un_aux->ofs = ofs;					  // 이 페이지에서 읽기 시작할 위치
-		un_aux->read_bytes = page_read_bytes; // 이 페이지에서 읽어야 하는 바이트 수
-		un_aux->zero_bytes = page_zero_bytes; // 이 페이지에서 read_bytes만큼 읽고 공간이 남아 0으로 채워야 하는 바이트 수
+		aux = malloc(sizeof(struct page_info_transmitter));
+		if (aux == NULL)
+			return false;
 
-		aux = (void *)un_aux;
+		((struct page_info_transmitter *)aux)->file = file;
+		((struct page_info_transmitter *)aux)->ofs = ofs;
+		((struct page_info_transmitter *)aux)->read_bytes = page_read_bytes;
+		((struct page_info_transmitter *)aux)->zero_bytes = page_zero_bytes;
+		// printf("\n\n\n*new page* \n");
+		// printf("file : %p \n", file);
+		// printf("ofs : %d \n", ofs);
+		// printf("page_read_bytes : %d \n", page_read_bytes);
+		// printf("page_zero_bytes : %d \n", page_zero_bytes);
 
 		if (!vm_alloc_page_with_initializer(VM_ANON, upage,
 											writable, lazy_load_segment, aux))
 		{
-			free((struct uninit_aux *)aux);
+			free(aux);
 			return false;
 		}
 
@@ -1011,12 +1001,11 @@ setup_stack(struct intr_frame *if_)
 	 * TODO: If success, set the rsp accordingly.
 	 * TODO: You should mark the page is stack. */
 	/* TODO: Your code goes here */
-	// VM_MARKER_0: 스택이 저장된 메모리 페이지임을 식별하기 위해 추가 // writable: argument_stack()에서 값을 넣어야 하니 True
-	if (vm_alloc_page(VM_ANON | VM_MARKER_0, stack_bottom, true)) // stack_bottom에 페이지를 하나 할당받는다.
+	if (vm_alloc_page(VM_ANON | VM_MARKER_0, stack_bottom, 1))
 	{
-		success = vm_claim_page(stack_bottom); // 할당 받은 페이지에 바로 물리 프레임을 매핑한다.
+		success = vm_claim_page(stack_bottom);
 		if (success)
-			if_->rsp = USER_STACK; // rsp를 변경한다 (argument_stack에서 이 위치부터 인자를 push한다.)
+			if_->rsp = USER_STACK;
 	}
 	return success;
 }

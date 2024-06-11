@@ -60,7 +60,7 @@ struct page
 
 	// size_t swap_slot;
 
-	struct list_elem mmap_elem;
+	// struct list_elem mmap_elem;
 	struct hash_elem hash_elem;
 
 	bool is_loaded;
@@ -78,23 +78,26 @@ struct page
 	};
 };
 
-// struct page_info_transmitter
-// {
-// 	struct file *file;
-// 	off_t ofs;
-// 	uint32_t read_bytes;
-// 	uint32_t zero_bytes;
-// };
+struct page_info_transmitter
+{
+	struct file *file;
+	off_t ofs;
+	uint32_t read_bytes;
+	uint32_t zero_bytes;
+	void *start_addr;
+	off_t size;
+	void *owner;
+};
 
 /* The representation of "frame" */
 struct frame
 {
-	// unchecked :멤버번수 추가
-	void *kva;
-	struct page *page;
-	struct list_elem frame_elem;
+	void *kva;					 // 커널 가상 주소
+	struct page *page;			 // 연결된 페이지
+	struct list_elem frame_elem; // 리스트 원소
 };
 
+// 전역 변수로 프레임 리스트 선언
 struct list frame_list;
 
 /* The function table for page operations.
@@ -123,8 +126,6 @@ struct supplemental_page_table
 	struct hash spt_hash;
 };
 
-// 구현 함수
-uint64_t spt_hash_func(const struct hash_elem *e, void *aux);
 bool page_table_entry_less_function(struct hash_elem *a, struct hash_elem *b, void *aux);
 
 #include "threads/thread.h"
@@ -150,4 +151,6 @@ bool vm_claim_page(void *va);
 enum vm_type page_get_type(struct page *page);
 
 // 작성 함수
+void spt_destory(struct hash_elem *hash_elem, void *aux UNUSED);
+
 #endif /* VM_VM_H */

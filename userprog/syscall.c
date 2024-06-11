@@ -16,6 +16,7 @@
 #include "threads/palloc.h"
 #include "devices/input.h"
 #include "userprog/process.h"
+#include "vm/vm.h"
 
 void syscall_entry(void);
 void syscall_handler(struct intr_frame *);
@@ -45,6 +46,7 @@ void close(int fd);
 
 /* project 3*/
 void *mmap(void *addr, size_t length, int writable, int fd, off_t offset);
+void munmap(void *addr);
 
 /* System call.
  *
@@ -94,6 +96,10 @@ void syscall_handler(struct intr_frame *f UNUSED)
 	// Getting the system call number from the interrupt frame /* %rax 는 시스템 콜 번호 */
 	int syscall_number = f->R.rax;
 
+	// /* project 3 stack growth */
+	// struct thread *t = thread_current();
+	// t->_rsp = f->rsp;
+
 	switch (syscall_number)
 	{
 	case SYS_HALT: /* Halt the operating system. */
@@ -137,6 +143,12 @@ void syscall_handler(struct intr_frame *f UNUSED)
 	case SYS_CLOSE: /* Close an open file. */
 		close((int)f->R.rdi);
 		break;
+	case SYS_MMAP:
+		f->R.rax = mmap((void *)f->R.rdi, (size_t)f->R.rsi, (int)f->R.rdx, (struct file *)f->R.r10, (off_t)f->R.r8);
+		break;
+	case SYS_MUNMAP:
+		munmap((void *)f->R.rdi);
+		break;
 	// case SYS_DUP2: /* 구현 실패... */
 	// 	dup2((int)f->R.rdi, (int)f->R.rsi);
 	// 	break;
@@ -150,13 +162,30 @@ void syscall_handler(struct intr_frame *f UNUSED)
 /* Check if the address is in user space */
 void check_address(void *addr)
 {
-	// 포인터가 가리키는 주소가 유저 영역의 주소인지 확인
-	// 주어진 주소가 현재 프로세스의 페이지 테이블에 유효하게 매핑되어 있는지 확인
-	if (addr == NULL || !is_user_vaddr(addr) || pml4_get_page(thread_current()->pml4, addr) == NULL)
+	struct supplemental_page_table *spt = &thread_current()->spt;
+	if (addr == NULL || !is_user_vaddr(addr) || spt_find_page(spt, pg_round_down(addr)) == NULL)
 	{
 		// 잘못된 접근일 경우 프로세스 종료
+		// printf("용의자 1");
 		exit(-1);
 	}
+}
+
+bool check_address_overlap(void *addr, size_t length)
+{
+	struct thread *t = thread_current();
+	void *end_addr = addr + length;
+
+	// 주소 범위를 페이지 단위로 확인
+	for (void *page_addr = addr; page_addr < end_addr; page_addr += PGSIZE)
+	{
+		if (spt_find_page(&t->spt, page_addr))
+		{
+			// 페이지가 이미 매핑되어 있음
+			return true;
+		}
+	}
+	return false;
 }
 
 /* Retrieve arguments from the user stack and store them in argv */
@@ -287,17 +316,18 @@ int exec(const char *cmd_line)
 	if (cl_copy == NULL)
 	{
 		// 메모리 할당에 실패하면 상태 -1로 프로세스를 종료합니다.
-		// palloc_free_page(cl_copy);
+		palloc_free_page(cl_copy);
+		// printf("용의자 2");
 		exit(-1);
 	}
 
 	// 명령어 줄을 새로 할당한 메모리 페이지에 복사합니다.
 	strlcpy(cl_copy, cmd_line, PGSIZE);
-
 	// 복사된 명령어 줄을 사용하여 새로운 프로세스를 실행합니다.
 	// 실행에 실패하면 상태 -1로 프로세스를 종료합니다.
 	if (process_exec(cl_copy) == -1)
 	{
+		// printf("용의자 3");
 		exit(-1);
 	}
 }
@@ -398,7 +428,19 @@ int filesize(int fd)
  */
 int read(int fd, void *buffer, unsigned size)
 {
-	check_address(buffer); // 주어진 버퍼 주소가 유효한지 확인합니다.
+	if (buffer == NULL || !is_user_vaddr(buffer))
+	{
+		// 잘못된 접근일 경우 프로세스 종료
+		// printf("용의자 1");
+		exit(-1);
+	} // 주어진 버퍼 주소가 유효한지 확인합니다.
+
+	/* 버퍼가 할당된 프레임이 writable이 아니면 exit(-1) */
+	struct page *found = spt_find_page(&thread_current()->spt, pg_round_down(buffer));
+	if (found != NULL && found->writable == false)
+		// printf("용의자 4");
+		exit(-1);
+
 	off_t read_byte;
 	uint8_t *read_buffer = buffer;
 	if (fd == STDIN_FILENO)
@@ -430,6 +472,16 @@ int read(int fd, void *buffer, unsigned size)
 		read_byte = file_read(f, buffer, size);
 		lock_release(&filesys_lock);
 	}
+
+	uint8_t *dirty_buffer = buffer;
+	off_t dirty_byte = read_byte;
+	while (0 < dirty_byte)
+	{
+		pml4_set_dirty(thread_current()->pml4, dirty_buffer, true);
+		dirty_buffer += PGSIZE;
+		dirty_byte -= PGSIZE;
+	}
+
 	return read_byte; // 파일에서 데이터를 읽고, 읽은 바이트 수를 반환합니다.
 }
 
@@ -443,7 +495,13 @@ int read(int fd, void *buffer, unsigned size)
  */
 int write(int fd, const void *buffer, unsigned size)
 {
-	check_address((void *)buffer); // 주어진 버퍼 주소가 유효한지 확인합니다.
+	// check_address((void *)buffer); // 주어진 버퍼 주소가 유효한지 확인합니다.
+
+	if (buffer == NULL || !is_user_vaddr(buffer))
+	{
+		exit(-1);
+	}
+
 	off_t write_byte;
 	if (fd == STDIN_FILENO)
 	{
@@ -529,6 +587,72 @@ void close(int fd)
 		// thread_current()->fd_table[fd] = NULL; // 파일 디스크립터 테이블에서 파일 포인터를 제거합니다.
 		remove_file_from_fdt(fd);
 	}
+}
+
+/**
+ *
+ * @brief Maps a file into memory.
+ *
+ * Maps length bytes of the file open as fd starting from offset byte into
+ * the process's virtual address space at addr. If successful, this function
+ * returns the virtual address where the file is mapped. On failure, it returns NULL.
+ *
+ * @param addr The starting address for the new mapping.
+ * @param length The length of the mapping.
+ * @param writable Whether the mapping is writable.
+ * @param fd The file descriptor of the file.
+ * @param offset The offset in the file where the mapping starts.
+ *
+ * @return The virtual address where the file is mapped if successful, NULL otherwise.
+ */
+void *mmap(void *addr, size_t length, int writable, int fd, off_t offset)
+{
+	// 유효성 검사: NULL 주소, 커널 주소, 페이지 정렬되지 않은 주소, 잘못된 길이, 잘못된 오프셋
+	if( addr == NULL||
+		is_kernel_vaddr(addr) ||
+      	(pg_round_down(addr) != addr) ||
+      	length >= KERN_BASE ||
+      	(pg_round_down(offset) != offset))
+      	return NULL;
+
+	// 콘솔 입출력 파일 디스크립터 확인
+	if (fd == STDIN_FILENO || fd == STDOUT_FILENO)
+		return NULL;
+
+	// 이미 매핑된 주소 범위인지 확인
+	if (check_address_overlap(addr, length))
+		return NULL;
+
+	// 파일 디스크립터로부터 파일 객체 가져오기
+	struct file *f = get_file_from_fdt(fd);
+	if (length == 0 || f == NULL || file_length(f) == 0)
+		exit(-1);
+
+	// 파일 재개방
+	struct file *reopen_file = file_reopen(f);
+
+	// do_mmap 함수를 호출하여 메모리 매핑 수행
+	return do_mmap(addr, length, writable, reopen_file, offset);
+}
+
+/**
+ * @brief Unmaps a memory-mapped file.
+ *
+ * Unmaps the mapping for the specified address range addr, which must be
+ * the virtual address returned by a previous call to mmap by the same process
+ * that has not yet been unmapped.
+ *
+ * @param addr The starting address of the mapping to unmap.
+ */
+void munmap(void *addr)
+{
+	// 페이지 테이블에서 해당 주소에 대한 페이지를 찾음
+	struct page *page = spt_find_page(&thread_current()->spt, addr);
+	if (!page || page->operations->type != VM_FILE)
+		return;
+
+	// do_munmap 함수를 호출하여 매핑 해제 수행
+	do_munmap(addr);
 }
 
 // /**
